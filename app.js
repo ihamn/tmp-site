@@ -9,12 +9,11 @@
     $('heat-ticks').append(line);
   }
   const polar = deg => [130 + 110 * Math.cos(deg * Math.PI / 180), 132 - 110 * Math.sin(deg * Math.PI / 180)];
-  let degrees = 180;
-  for (const [span, color] of [[79,'#74bec9'],[48,'#98bfa4'],[36,'#d9a76a'],[17,'#d97b72']]) {
-    const from = polar(degrees), to = polar(degrees - span), p = document.createElementNS(svgNS, 'path');
+  for (const band of G.SPEED_BANDS) {
+    const from = polar(180*(1-G.speedFraction(band.from))), to = polar(180*(1-G.speedFraction(band.to))), p = document.createElementNS(svgNS, 'path');
     p.setAttribute('d', `M ${from.join(' ')} A 110 110 0 0 1 ${to.join(' ')}`);
-    p.setAttribute('stroke', color); p.setAttribute('stroke-width', '9'); p.setAttribute('fill', 'none');
-    $('dial-bands').append(p); degrees -= span;
+    p.setAttribute('stroke', band.color); p.setAttribute('stroke-width', '9'); p.setAttribute('fill', 'none');
+    $('dial-bands').append(p);
   }
   for (let i=0;i<=12;i++) {
     const a=Math.PI-i*Math.PI/12, line=document.createElementNS(svgNS,'line');
@@ -53,14 +52,14 @@
   function renderHUD() {
     const section=G.sectionAt(s.position), index=G.ROUTE.indexOf(section), next=G.ROUTE[index+1];
     $('score').textContent=Math.round(s.score);$('time').textContent=clock(s.elapsed);
-    $('speed').textContent=Math.round(s.speed);$('heat').textContent=Math.round(s.heat*100);
+    $('speed').textContent=s.speed.toFixed(1);$('heat').textContent=Math.round(s.heat*100);
     $('gear').textContent=signed(s.gear);$('gear-description').textContent=s.lock>0?'冷却锁档':s.gear<0?'制动':s.gear>0?'牵引':'空档';
     const limited=G.isLimited(section);
     $('section-name').textContent=`${section.name} · ${limited?'目标速度':'自由行驶'}`;
     $('target-speed').textContent=limited?`${section.low}–${section.high}`:'不限速';
     $('target-unit').hidden=!limited;$('target-range').hidden=!limited;
-    if(limited){$('target-range').style.left=`${section.low/120*100}%`;$('target-range').style.width=`${(section.high-section.low)/120*100}%`;}
-    $('speed-marker').style.left=`${Math.min(100,s.speed/120*100)}%`;
+    if(limited){$('target-range').style.left=`${G.speedFraction(section.low)*100}%`;$('target-range').style.width=`${(G.speedFraction(section.high)-G.speedFraction(section.low))*100}%`;}
+    $('speed-marker').style.left=`${G.speedFraction(s.speed)*100}%`;
     const upcoming=section.transition?next:G.ROUTE.slice(index+1).find(r=>!r.transition);
     $('upcoming').textContent=upcoming?`${Math.max(0,Math.ceil(upcoming.from-s.position))} m 后 · ${upcoming.name} ${G.isLimited(upcoming)?`${upcoming.low}–${upcoming.high}`:'不限速'}`:'终点 · 停稳对位';
     const hint=s.sectionHint, showHint=s.phase!=='finished'&&(limited||(hint&&hint.until>s.elapsed));
@@ -77,6 +76,7 @@
       $('approach-distance').textContent=`${Math.ceil(approach.distance)} m · ${approach.section.low}–${approach.section.high} km/h`;
     }
     [...document.querySelectorAll('.route-segment')].forEach((el,i)=>el.classList.toggle('current',i===index));
+    $('route-line').style.setProperty('--route-progress',`${Math.max(0,Math.min(100,s.position/G.LENGTH*100))}%`);
     $('scene-caption').textContent=`雪原线路 / ${section.name} · 环境加速度 ${signed(section.environment)}`;
     const heatState=s.lock>0?'overheated':s.heat>=.75?'warning':'normal';
     $('heat-panel').dataset.state=heatState;
@@ -84,17 +84,24 @@
     $('heat-fill').setAttribute('stroke-dashoffset',(44*Math.PI*210/180)*(1-s.heat));
     $('heat-dial').setAttribute('aria-label',`核心温度 ${Math.round(s.heat*100)}%，${heatState==='normal'?'正常':heatState==='warning'?'偏高':'过热冷却'}`);
     $('game').classList.toggle('overheated',s.lock>0);
-    const a=Math.PI-Math.min(1,s.speed/120)*Math.PI;
+    const a=Math.PI*(1-G.speedFraction(s.speed));
     $('needle').setAttribute('x2',130+94*Math.cos(a));$('needle').setAttribute('y2',132-94*Math.sin(a));
-    $('acceleration').textContent=s.phase==='ready'?'空档 · 平地弱减速':s.acceleration>0?'速度上升 ↗':s.acceleration<0?'速度下降 ↘':'速度持平';
+    const net=G.accelerationAt(s.speed,G.RULES.traction[s.gear+3]+section.environment);
+    const motion=s.phase==='paused'?'行驶暂停':s.phase!=='running'||s.speed<=0&&net<=0?'列车静止':net>0?'速度上升 ↗':net<0?'速度下降 ↘':'速度持平';
+    $('acceleration').textContent=`${G.speedStatus(s.speed,section)} · ${motion}${s.speed>G.RULES.maxSpeed?' · 超出表盘量程':''}`;
+    $('needle').closest('svg').setAttribute('aria-label',`实际速度 ${s.speed.toFixed(1)} km/h，${G.speedStatus(s.speed,section)}，表盘量程 0–${G.RULES.maxSpeed} km/h`);
     $('distance').textContent=`${Math.floor(s.position)} / ${G.LENGTH} m`;$('route-cursor').style.left=`${Math.min(100,s.position/G.LENGTH*100)}%`;
     const active=s.phase==='running'&&s.lock===0;
     $('up').disabled=!active||s.gear===3;$('down').disabled=!active||s.gear===-3;$('pause').disabled=s.phase!=='running';
     $('docking').classList.toggle('visible',s.position>=G.LENGTH-G.RULES.dockingDistance&&s.phase!=='finished');
     const dist=G.LENGTH-s.position;
     $('dock-distance').textContent=dist>=0?`距停车点 ${Math.ceil(dist)} m`:`超过停车点 ${Math.floor(-dist)} m`;
-    $('dock-marker').style.left=`${Math.max(0,Math.min(100,(s.position-G.LENGTH+100)/135*100))}%`;
-    $('notice').textContent=s.noticeUntil>s.elapsed?s.notice:s.phase==='running'&&s.speed<.3&&s.position<G.LENGTH-5?'升至正档牵引，让列车起步':s.phase==='running'&&dist<=100&&dist>5?'提前降至负档制动，停在金框内':'';
+    const dockSpan=G.RULES.dockingDistance+G.RULES.overshootDistance;
+    $('dock-marker').style.left=`${Math.max(0,Math.min(100,(s.position-G.LENGTH+G.RULES.dockingDistance)/dockSpan*100))}%`;
+    const dockTarget=document.querySelector('.dock-target');
+    dockTarget.style.left=`${(G.RULES.dockingDistance-G.RULES.dockingTolerance)/dockSpan*100}%`;
+    dockTarget.style.width=`${G.RULES.dockingTolerance*2/dockSpan*100}%`;
+    $('notice').textContent=s.noticeUntil>s.elapsed?s.notice:s.phase==='running'&&s.speed<.3&&s.position<G.LENGTH-5?'升至正档牵引，让列车起步':s.phase==='running'&&dist<=G.RULES.dockingDistance&&dist>5?'提前减速，停在金框内':'';
     if(shownPhase!==s.phase) { shownPhase=s.phase; if(s.phase!=='running') showOverlay(); }
   }
   function begin() {
