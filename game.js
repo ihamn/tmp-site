@@ -69,8 +69,9 @@
     s.heat = Math.min(1, s.heat + RULES.heatPerShift);
     if (s.heat >= 1 - 1e-9) {
       s.gear = 0; s.lock = RULES.overheatSeconds; s.overheats++;
-      s.penalties += RULES.overheatPenalty; s.score -= RULES.overheatPenalty;
-      notify(s, '轴温过热 · −200 分 · 空档冷却');
+      const deducted=Math.min(s.score,RULES.overheatPenalty);
+      s.penalties += deducted; s.score -= deducted;
+      notify(s, `轴温过热 · −${Math.round(deducted)} 分 · 空档冷却`);
     }
     return true;
   }
