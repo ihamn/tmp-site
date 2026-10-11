@@ -13,23 +13,24 @@
     needleDegreesPerAcceleration: 12,
     blueResponseFactor: .5,
     accelerationScale: 12 * 120 / 180, maxSpeed: 120, scoreStep: 5, pointsPerMeter: 1,
-    dockingDistance: 300, dockingTolerance: 5, dockingPoints: 200,
+    perfectSectionPoints: 100,
+    dockingDistance: 100, dockingTolerance: 5, dockingPoints: 200,
     stopSpeed: .3, overshootDistance: 35, approachDistance: 80,
     scenePixelsPerMeter: 8
   });
-  // Trial level, not recovered official level data. All environments are from the design table.
+  // Trial level, not recovered official level data. Transition profiles interpolate table endpoints.
   const ROUTE = Object.freeze([
     { from: 0, to: 240, name: '车站出发', environment: 0, low: null, high: null },
-    { from: 240, to: 640, name: '缓坡巡行', environment: -2.5, low: 53, high: 84, leadDistance: 180 },
-    { from: 640, to: 1000, name: '提速准备', transition: true, environment: 4.5, low: null, high: null },
+    { from: 240, to: 640, name: '平地慢行', environment: 0, low: 20, high: 52, leadDistance: 180 },
+    { from: 640, to: 1000, name: '下坡转场', transition: true, environment: 4.5, environmentStart: 0, low: null, high: null },
     { from: 1000, to: 1480, name: '下坡快行', environment: 4.5, low: 85, high: 108, leadDistance: 300 },
-    { from: 1480, to: 1950, name: '减速准备', transition: true, environment: -2.5, low: null, high: null },
+    { from: 1480, to: 1950, name: '坡底转场', transition: true, environment: -2.5, environmentStart: 4.5, low: null, high: null },
     { from: 1950, to: 2180, name: '缓坡慢行', environment: -2.5, low: 20, high: 52, leadDistance: 400 },
-    { from: 2180, to: 2800, name: '坡道转场', transition: true, environment: -3.5, low: null, high: null },
+    { from: 2180, to: 2800, name: '上坡转场', transition: true, environment: -3.5, environmentStart: -2.5, low: null, high: null },
     { from: 2800, to: 3320, name: '上坡巡行', environment: -3.5, low: 53, high: 84, leadDistance: 400 },
-    { from: 3320, to: 3690, name: '站前减速', transition: true, environment: -2.5, low: null, high: null },
+    { from: 3320, to: 3690, name: '站前转场', transition: true, environment: -2.5, environmentStart: -3.5, low: null, high: null },
     { from: 3690, to: 3900, name: '站前慢行', environment: -2.5, low: 20, high: 52, leadDistance: 300 },
-    { from: 3900, to: 4200, name: '进站停靠', transition: true, environment: 0, low: null, high: null }
+    { from: 3900, to: 4200, name: '进站停靠', transition: true, environment: 0, environmentStart: -2.5, rampLength: 200, low: null, high: null }
   ].map(Object.freeze));
   const LENGTH = ROUTE[ROUTE.length - 1].to;
   const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
@@ -40,6 +41,7 @@
   ].map(Object.freeze));
   function speedFraction(speed) { return clamp(speed / RULES.maxSpeed, 0, 1); }
   function accelerationAt(speed, net) {
+    if(speed>=RULES.maxSpeed&&net>=0)return 0;
     const blue=speed<53||(speed===53&&net<0);
     return net*RULES.accelerationScale*(blue?RULES.blueResponseFactor:1);
   }
@@ -50,16 +52,19 @@
       +blueSpeed*blueSpeed/(2*normalBrake*RULES.blueResponseFactor*3.6);
   }
   function advanceMotion(speed, net, seconds) {
+    speed=clamp(speed,0,RULES.maxSpeed);
     let distance=0,remaining=seconds;
-    // Split exactly at the blue boundary and at a stop; speed/position stay continuous.
+    // Split at the blue boundary, stop and top speed; integrate cruising distance at the cap.
     while(remaining>1e-10) {
       const acceleration=accelerationAt(speed,net);
       if(speed<=0&&acceleration<=0)break;
+      if(acceleration===0){distance+=speed/3.6*remaining;break;}
       let duration=remaining;
       if(acceleration>0&&speed<53)duration=Math.min(duration,(53-speed)/acceleration);
+      else if(acceleration>0)duration=Math.min(duration,(RULES.maxSpeed-speed)/acceleration);
       else if(acceleration<0&&speed>53)duration=Math.min(duration,(53-speed)/acceleration);
       else if(acceleration<0)duration=Math.min(duration,-speed/acceleration);
-      const next=Math.max(0,speed+acceleration*duration);
+      const next=clamp(speed+acceleration*duration,0,RULES.maxSpeed);
       distance+=(speed+next)/2/3.6*duration;
       speed=Math.abs(next-53)<1e-9?53:next;
       remaining-=duration;
@@ -72,32 +77,45 @@
   function sectionAt(position) {
     return ROUTE.find(s => position < s.to) || ROUTE[ROUTE.length - 1];
   }
+  function environmentAt(position) {
+    const section=sectionAt(position);
+    if(section.environmentStart===undefined)return section.environment;
+    const length=section.rampLength||section.to-section.from;
+    const t=clamp((position-section.from)/length,0,1),blend=t*t*(3-2*t);
+    return section.environmentStart+(section.environment-section.environmentStart)*blend;
+  }
   function isLimited(section) { return Number.isFinite(section.low) && Number.isFinite(section.high); }
   function sectionColor(section) {
     return !isLimited(section)?'#99adb6':section.high<=52?'#74bec9':section.high<=84?'#98bfa4':section.high<=108?'#d9a76a':'#d97b72';
   }
   function approachAt(position) {
+    if(isLimited(sectionAt(position)))return null;
     const section=ROUTE.find(r=>isLimited(r)&&r.from>position);
     if(!section||section.from-position>(section.leadDistance||RULES.approachDistance))return null;
     return {section,distance:section.from-position,color:sectionColor(section)};
   }
   // Screen Y grows downward: a positive downhill force makes the track descend to the right.
   // Visual inclination is a calibration, not a claim about the original game's physical slope.
-  function terrainSlope(section) {
-    const e=section.environment;
-    return Math.sign(e)*Math.min(.22,.12*Math.sqrt(Math.abs(e)));
-  }
+  const slopePerEnvironment=.048;
   function terrainAt(position) {
-    let height=0;
+    let area=0;
     for(const section of ROUTE) {
-      height+=Math.max(0,Math.min(position,section.to)-section.from)*terrainSlope(section)*RULES.scenePixelsPerMeter;
+      const x=Math.max(0,Math.min(position,section.to)-section.from);
+      if(section.environmentStart===undefined)area+=x*section.environment;
+      else {
+        const length=section.rampLength||section.to-section.from,t=Math.min(1,x/length);
+        area+=section.environmentStart*Math.min(x,length)
+          +(section.environment-section.environmentStart)*length*(t*t*t-.5*t*t*t*t)
+          +Math.max(0,x-length)*section.environment;
+      }
       if(position<section.to)break;
     }
-    return {height,slope:terrainSlope(sectionAt(position))};
+    return {height:area*slopePerEnvironment*RULES.scenePixelsPerMeter,slope:environmentAt(position)*slopePerEnvironment};
   }
   function createState() {
     return { phase: 'ready', gear: 0, speed: 0, position: 0, heat: 0, lock: 0,
       elapsed: 0, score: 0, distanceScore: 0, dockScore: 0, penalties: 0,
+      perfectScore: 0, perfectSections: 0, sectionRuns: ROUTE.map(()=>null),
       legalDistance: 0, pendingDistance: 0, shifts: 0, overheats: 0,
       acceleration: 0, result: null, notice: '', noticeUntil: 0, routeIndex: 0, sectionHint: null };
   }
@@ -147,12 +165,13 @@
       s.heat = s.lock / RULES.overheatSeconds;
       if (s.lock < 1e-9) { s.lock = 0; s.heat = 0; notify(s, '冷却完成 · 可以换挡'); }
     } else s.heat = Math.max(0, s.heat - RULES.cooling * dt);
-    const net=RULES.traction[s.gear + 3] + section.environment;
-    // The gauge range is display calibration, not a physical speed restriction.
+    const net=RULES.traction[s.gear + 3] + environmentAt(before);
+    // The vehicle top speed applies even on unrestricted track and under downhill force.
     const motion=advanceMotion(oldSpeed,net,dt);
     s.speed=motion.speed;s.position+=motion.distance;
-    s.acceleration=accelerationAt(s.speed,net);
+    s.acceleration=accelerationAt(s.speed,RULES.traction[s.gear + 3]+environmentAt(s.position));
     addDistance(s, before, s.position, (oldSpeed + s.speed) / 2);
+    checkPerfectSections(s,before,s.position,oldSpeed,net,dt);
     const entered=sectionAt(s.position), index=ROUTE.indexOf(entered);
     if(index!==s.routeIndex) {
       s.routeIndex=index;
@@ -163,6 +182,36 @@
     if (s.position >= LENGTH - RULES.dockingTolerance && s.speed <= RULES.stopSpeed && s.acceleration <= 0) finish(s);
     else if (s.position >= LENGTH + RULES.overshootDistance) finish(s, true);
   }
+  function checkPerfectSections(s,from,to,oldSpeed,net,dt) {
+    // Only the portion inside the section counts. Solve boundary speeds on the same motion curve.
+    const speedAt=position=>{
+      if(position<=from)return oldSpeed;
+      if(position>=to)return s.speed;
+      let low=0,high=dt;
+      for(let i=0;i<40;i++) {
+        const middle=(low+high)/2;
+        if(advanceMotion(oldSpeed,net,middle).distance<position-from)low=middle;else high=middle;
+      }
+      return advanceMotion(oldSpeed,net,(low+high)/2).speed;
+    };
+    for(let i=0;i<ROUTE.length;i++) {
+      const r=ROUTE[i];
+      if(!isLimited(r)||to<r.from||from>=r.to)continue;
+      let run=s.sectionRuns[i];
+      if(run?.settled)continue;
+      if(!run)run=s.sectionRuns[i]={entered:from<=r.from,perfect:true,covered:0,settled:false};
+      run.covered+=Math.max(0,Math.min(to,r.to)-Math.max(from,r.from));
+      const first=speedAt(Math.max(from,r.from)),last=speedAt(Math.min(to,r.to));
+      if(first<r.low||first>r.high||last<r.low||last>r.high)run.perfect=false;
+      if(to>=r.to) {
+        run.settled=true;
+        if(run.entered&&run.perfect&&run.covered>=r.to-r.from-1e-6) {
+          s.perfectSections++;s.perfectScore+=RULES.perfectSectionPoints;s.score+=RULES.perfectSectionPoints;
+          notify(s,`${r.name} · 完美通过 +${RULES.perfectSectionPoints} 分`,4);
+        }
+      }
+    }
+  }
   function update(s, dt) {
     if (s.phase !== 'running' || !Number.isFinite(dt) || dt <= 0) return;
     // Stable substeps, real elapsed seconds: no hidden 2x fast-forward.
@@ -172,5 +221,5 @@
       integrate(s, substep); remaining -= substep;
     }
   }
-  return { RULES, ROUTE, LENGTH, SPEED_BANDS, speedFraction, speedStatus, accelerationAt, stoppingDistance, advanceMotion, createState, start, shift, update, sectionAt, isLimited, sectionColor, approachAt, terrainAt, addDistance };
+  return { RULES, ROUTE, LENGTH, SPEED_BANDS, speedFraction, speedStatus, accelerationAt, stoppingDistance, advanceMotion, environmentAt, createState, start, shift, update, sectionAt, isLimited, sectionColor, approachAt, terrainAt, addDistance };
 });
