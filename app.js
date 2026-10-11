@@ -8,7 +8,7 @@
     for(const [key,value] of Object.entries({x1:56+39*Math.cos(a),y1:56+39*Math.sin(a),x2:56+49*Math.cos(a),y2:56+49*Math.sin(a),stroke:'#b7ccd0','stroke-width':1.5}))line.setAttribute(key,value);
     $('heat-ticks').append(line);
   }
-  const polar = deg => [130 + 110 * Math.cos(deg * Math.PI / 180), 132 - 110 * Math.sin(deg * Math.PI / 180)];
+  const polar = (deg,radius=110) => [130 + radius * Math.cos(deg * Math.PI / 180), 132 - radius * Math.sin(deg * Math.PI / 180)];
   for (const band of G.SPEED_BANDS) {
     const from = polar(180*(1-G.speedFraction(band.from))), to = polar(180*(1-G.speedFraction(band.to))), p = document.createElementNS(svgNS, 'path');
     p.setAttribute('d', `M ${from.join(' ')} A 110 110 0 0 1 ${to.join(' ')}`);
@@ -43,7 +43,7 @@
     $('brief-footnote').textContent=s.phase==='paused'?pauseText:'触屏点按升降档 · 键盘 ↑ / ↓ 或 W / S';
     if(s.phase==='finished') {
       $('results').replaceChildren();
-      const rows=[['总得分',Math.round(s.score)],['合规距离',`${Math.round(s.legalDistance)} m`],['停靠得分',s.dockScore],['过热扣分',`−${s.penalties}`],['停靠偏差',s.result.missed?'驶过范围':`${s.result.error.toFixed(1)} m`],['行驶时间',clock(s.elapsed)]];
+      const rows=[['总得分',Math.round(s.score)],['合规距离',`${Math.round(s.legalDistance)} m`],['完美通过',`${s.perfectSections} 段 · +${s.perfectScore} 分`],['停靠得分',s.dockScore],['过热扣分',`−${s.penalties}`],['停靠偏差',s.result.missed?'驶过范围':`${s.result.error.toFixed(1)} m`],['行驶时间',clock(s.elapsed)]];
       const grid=document.createElement('div');grid.className='results';
       for(const [label,value] of rows) { const cell=document.createElement('div'),small=document.createElement('small'),strong=document.createElement('strong');small.textContent=label;strong.textContent=value;cell.append(small,strong);grid.append(cell); }
       $('results').append(grid);
@@ -55,11 +55,14 @@
     $('speed').textContent=s.speed.toFixed(1);$('heat').textContent=Math.round(s.heat*100);
     $('gear').textContent=signed(s.gear);$('gear-description').textContent=s.lock>0?'冷却锁档':s.gear<0?'制动':s.gear>0?'牵引':'空档';
     const limited=G.isLimited(section);
-    $('section-name').textContent=`${section.name} · ${limited?'目标速度':'自由行驶'}`;
+    $('section-name').textContent=`当前 · ${section.name}`;
     $('target-speed').textContent=limited?`${section.low}–${section.high}`:'不限速';
-    $('target-unit').hidden=!limited;$('target-range').hidden=!limited;
-    if(limited){$('target-range').style.left=`${G.speedFraction(section.low)*100}%`;$('target-range').style.width=`${(G.speedFraction(section.high)-G.speedFraction(section.low))*100}%`;}
-    $('speed-marker').style.left=`${G.speedFraction(s.speed)*100}%`;
+    $('target-unit').hidden=!limited;$('target-range').toggleAttribute('hidden',!limited);
+    if(limited){
+      const low=180*(1-G.speedFraction(section.low)),high=180*(1-G.speedFraction(section.high));
+      const outerLow=polar(low,119),outerHigh=polar(high,119),innerHigh=polar(high,101),innerLow=polar(low,101);
+      $('target-range').setAttribute('d',`M ${outerLow.join(' ')} A 119 119 0 0 1 ${outerHigh.join(' ')} L ${innerHigh.join(' ')} A 101 101 0 0 0 ${innerLow.join(' ')} Z`);
+    }
     const upcoming=section.transition?next:G.ROUTE.slice(index+1).find(r=>!r.transition);
     $('upcoming').textContent=upcoming?`${Math.max(0,Math.ceil(upcoming.from-s.position))} m 后 · ${upcoming.name} ${G.isLimited(upcoming)?`${upcoming.low}–${upcoming.high}`:'不限速'}`:'终点 · 停稳对位';
     const hint=s.sectionHint, showHint=s.phase!=='finished'&&(limited||(hint&&hint.until>s.elapsed));
@@ -77,7 +80,8 @@
     }
     [...document.querySelectorAll('.route-segment')].forEach((el,i)=>el.classList.toggle('current',i===index));
     $('route-line').style.setProperty('--route-progress',`${Math.max(0,Math.min(100,s.position/G.LENGTH*100))}%`);
-    $('scene-caption').textContent=`雪原线路 / ${section.name} · 环境加速度 ${signed(section.environment)}`;
+    const environment=G.environmentAt(s.position);
+    $('scene-caption').textContent=`雪原线路 / ${section.name} · 环境贡献 ${signed(Number(environment.toFixed(1)))}`;
     const heatState=s.lock>0?'overheated':s.heat>=.75?'warning':'normal';
     $('heat-panel').dataset.state=heatState;
     $('heat-status').textContent=s.lock>0?`冷却锁档 ${s.lock.toFixed(1)} s`:s.heat>=.75?'温度偏高':'核心温度';
@@ -86,9 +90,9 @@
     $('game').classList.toggle('overheated',s.lock>0);
     const a=Math.PI*(1-G.speedFraction(s.speed));
     $('needle').setAttribute('x2',130+94*Math.cos(a));$('needle').setAttribute('y2',132-94*Math.sin(a));
-    const net=G.accelerationAt(s.speed,G.RULES.traction[s.gear+3]+section.environment);
-    const motion=s.phase==='paused'?'行驶暂停':s.phase!=='running'||s.speed<=0&&net<=0?'列车静止':net>0?'速度上升 ↗':net<0?'速度下降 ↘':'速度持平';
-    $('acceleration').textContent=`${G.speedStatus(s.speed,section)} · ${motion}${s.speed>G.RULES.maxSpeed?' · 超出表盘量程':''}`;
+    const net=G.accelerationAt(s.speed,G.RULES.traction[s.gear+3]+environment);
+    const motion=s.phase==='paused'?'行驶暂停':s.phase!=='running'||s.speed<=0&&net<=0?'列车静止':net>0?'速度上升 ↗':net<0?'速度下降 ↘':s.speed>=G.RULES.maxSpeed?'已达最高速度':'速度持平';
+    $('acceleration').textContent=`${G.speedStatus(s.speed,section)} · ${motion}`;
     $('needle').closest('svg').setAttribute('aria-label',`实际速度 ${s.speed.toFixed(1)} km/h，${G.speedStatus(s.speed,section)}，表盘量程 0–${G.RULES.maxSpeed} km/h`);
     $('distance').textContent=`${Math.floor(s.position)} / ${G.LENGTH} m`;$('route-cursor').style.left=`${Math.min(100,s.position/G.LENGTH*100)}%`;
     const active=s.phase==='running'&&s.lock===0;
